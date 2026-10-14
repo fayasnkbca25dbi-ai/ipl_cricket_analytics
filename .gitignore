@@ -1,2 +1,10 @@
 data
+!data/
+data/*
+!data/raw/
+data/raw/*
+!data/raw/tables/
+data/raw/tables/*
+!data/raw/tables/deliveries.csv
+!data/raw/tables/matches.csv
 

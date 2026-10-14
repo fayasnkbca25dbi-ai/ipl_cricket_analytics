@@ -24,6 +24,7 @@ import html
 import os
 import re
 import sqlite3
+import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -221,6 +222,41 @@ def find_db() -> Path | None:
 
 
 DB_PATH = find_db()
+CSV_DELIVERIES = ROOT / "data" / "raw" / "tables" / "deliveries.csv"
+CSV_MATCHES = ROOT / "data" / "raw" / "tables" / "matches.csv"
+CSV_LOAD_ERROR = None
+CSV_MODE = False
+
+
+@st.cache_resource(show_spinner="Preparing IPL data for the dashboard...")
+def build_db_from_csv(deliveries_path: str, matches_path: str,
+                      deliveries_mtime: float, matches_mtime: float) -> Path:
+    """Build a temporary SQLite database from the deployable source CSVs."""
+    fd, db_path = tempfile.mkstemp(prefix="ipl-dashboard-", suffix=".db")
+    os.close(fd)
+    try:
+        con = sqlite3.connect(db_path)
+        try:
+            pd.read_csv(matches_path).to_sql("matches", con, index=False, if_exists="replace")
+            for chunk in pd.read_csv(deliveries_path, chunksize=100_000):
+                chunk.to_sql("deliveries", con, index=False, if_exists="append", chunksize=10_000)
+        finally:
+            con.close()
+        return Path(db_path)
+    except Exception:
+        Path(db_path).unlink(missing_ok=True)
+        raise
+
+
+if DB_PATH is None and CSV_DELIVERIES.is_file() and CSV_MATCHES.is_file():
+    try:
+        DB_PATH = build_db_from_csv(
+            str(CSV_DELIVERIES), str(CSV_MATCHES),
+            CSV_DELIVERIES.stat().st_mtime, CSV_MATCHES.stat().st_mtime,
+        )
+        CSV_MODE = True
+    except Exception as exc:
+        CSV_LOAD_ERROR = str(exc)
 
 
 def qi(name: str) -> str:
@@ -277,9 +313,13 @@ st.markdown('<div class="hdr"><h1>IPL Batters Analytics</h1>'
 
 if DB_PATH is None:
     tried = ", ".join(str(c) for c in DB_CANDIDATES if c)
-    st.error("Database not found. Expected `data/raw/ipl.db` under the project root "
-             f"(looked in: {tried}). The `data/` folder is git-ignored, so copy `ipl.db` there "
-             "or set the IPL_DB_PATH environment variable.")
+    if CSV_LOAD_ERROR:
+        st.error(f"Could not build the dashboard database from the source CSV files: {CSV_LOAD_ERROR}")
+    else:
+        st.error("No IPL data found. Expected a SQLite database at `data/raw/ipl.db` "
+                 f"(looked in: {tried}) or both `data/raw/tables/deliveries.csv` and "
+                 "`data/raw/tables/matches.csv`. Include the CSV files in your repository, "
+                 "or set the `IPL_DB_PATH` environment variable to a database file.")
     st.stop()
 
 SCHEMA = discover_schema(str(DB_PATH), DB_PATH.stat().st_mtime)
@@ -294,11 +334,14 @@ SEASON_COL = detect(M_COLS, SEASON_CANDIDATES)
 MAP: dict[str, str | None] = {}
 with st.sidebar:
     st.markdown("### Data source")
-    try:
-        shown = DB_PATH.relative_to(ROOT)
-    except ValueError:
-        shown = DB_PATH
-    st.caption(f"`{shown}`")
+    if CSV_MODE:
+        st.caption("Imported from `data/raw/tables/deliveries.csv` and `matches.csv`")
+    else:
+        try:
+            shown = DB_PATH.relative_to(ROOT)
+        except ValueError:
+            shown = DB_PATH
+        st.caption(f"`{shown}`")
     with st.expander("Column mapping (auto-detected)"):
         st.caption("Detected from the real `deliveries` schema. Change only if a column was mis-detected.")
         for role, cands in ROLE_CANDIDATES.items():
